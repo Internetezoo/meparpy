@@ -1,21 +1,16 @@
-from flask import Flask, request, Response
-import requests
+from flask import Flask, Response, request
+from curl_cffi import requests
 import math
+from pyproj import Transformer
 
 app = Flask(__name__)
 
-def wgs84_to_eov(lat, lon):
-    """
-    Egyszerűsített WGS84 -> EOV átszámítás a MEPAR koordinátákhoz.
-    """
-    east = (lon - 19.04833) * 72000 + 650000
-    north = (lat - 47.14444) * 111100 + 200000
-    return east, north
+# WGS84 (GPS) -> EOV (Magyar Egységes Országos Vetület) konverter
+# Az 'always_xy=True' biztosítja, hogy a sorrend (lon, lat) -> (East, North) legyen
+transformer = Transformer.from_crs("EPSG:4326", "EPSG:23700", always_xy=True)
 
 def get_tile_bounds(z, x, y):
-    """
-    Kiszámolja a csempe (tile) WGS84 határait.
-    """
+    """Kiszámolja a csempe bal felső sarkának WGS84 (GPS) koordinátáit"""
     n = 2.0 ** z
     lon_deg = x / n * 360.0 - 180.0
     lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
@@ -24,43 +19,52 @@ def get_tile_bounds(z, x, y):
 
 @app.route('/api/tile/<int:z>/<int:x>/<int:y>.png')
 def mepar_proxy(z, x, y):
-    # 1. Koordináta számítás (Csempe bal felső sarka)
-    lat, lon = get_tile_bounds(z, x, y)
-    
-    # 2. Átváltás EOV-ra (A MEPAR ezt eszi meg)
-    eov_x, eov_y = wgs84_to_eov(lat, lon)
-    
-    # 3. MEPAR BBOX kiszámítása (kb. 500 méteres környezet a zoomtól függően)
-    # Ez egy közelítés, a pontosabb képhez a z-szinttel kellene skálázni
-    diff = 1000 / (2 ** (z - 10)) if z > 10 else 2000
-    bbox = f"{eov_x},{eov_y-diff},{eov_x+diff},{eov_y}"
-
-    # 4. MEPAR URL összeállítása
-    mepar_url = (
-        "https://mepar.mvh.allamkincstar.gov.hu/arcgis/services/mepar/mepar_f_2023/MapServer/WMSServer?"
-        "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&BBOX={}&"
-        "CRS=EPSG:23700&WIDTH=256&HEIGHT=256&LAYERS=1,2,3&"
-        "STYLES=&FORMAT=image/png&TRANSPARENT=TRUE"
-    ).format(bbox)
-
-    # 5. Lekérés a MEPAR-tól (Referer fejléccel, hogy ne dobjon ki)
-    headers = {
-        "Referer": "https://mepar.mvh.allamkincstar.gov.hu/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
-
     try:
-        print(f"Lekérés: z={z}, x={x}, y={y} -> BBOX: {bbox}")
-        resp = requests.get(mepar_url, headers=headers, timeout=10)
-        return Response(resp.content, mimetype='image/png')
-    except Exception as e:
-        print(f"Hiba: {e}")
-        return "Hiba a letöltéskor", 500
+        # 1. Csempe koordináta kiszámítása (GPS)
+        lat, lon = get_tile_bounds(z, x, y)
+        
+        # 2. Átváltás EOV-ra (Magyar vetület)
+        eov_x, eov_y = transformer.transform(lon, lat)
+        
+        # 3. Felbontás alapú BBOX számítás (Web Mercator -> EOV közelítés)
+        # 156543.03 a föld kerülete / 256 pixel a 0. zoomon
+        res = 156543.03 / (2**z) 
+        size = res * 256 # Egy csempe mérete méterben az adott zoomon
+        
+        # A MEPAR WMS bal-alsó és jobb-felső sarkot vár (minX, minY, maxX, maxY)
+        bbox = f"{eov_x},{eov_y-size},{eov_x+size},{eov_y}"
 
-# Alapértelmezett útvonal a teszteléshez
+        # 4. MEPAR WMS URL összeállítása (2023-as rétegek)
+        mepar_url = (
+            "https://mepar.mvh.allamkincstar.gov.hu/arcgis/services/mepar/mepar_f_2023/MapServer/WMSServer?"
+            "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&BBOX={}&"
+            "CRS=EPSG:23700&WIDTH=256&HEIGHT=256&LAYERS=1,2,3&"
+            "STYLES=&FORMAT=image/png&TRANSPARENT=TRUE"
+        ).format(bbox)
+
+        # 5. Fejlécek beállítása (Böngészőnek álcázzuk magunkat)
+        headers = {
+            "Referer": "https://mepar.mvh.allamkincstar.gov.hu/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        # Lekérés curl_cffi-vel (impersonate="chrome110" segít a TLS ujjlenyomatnál)
+        r = requests.get(mepar_url, headers=headers, impersonate="chrome110", timeout=15)
+        
+        # Ha a MEPAR hibaüzenetet küld (pl. XML-t kép helyett)
+        if r.status_code != 200:
+             return f"MEPAR hiba: {r.status_code}", 502
+
+        return Response(r.content, mimetype='image/png')
+
+    except Exception as e:
+        # Ez megjelenik a Vercel logban, ha hiba van
+        print(f"HIBA: {str(e)}")
+        return f"Szerver hiba: {str(e)}", 500
+
 @app.route('/')
 def home():
-    return "MEPAR Proxy Online. Használd az /api/tile/z/x/y.png formátumot!"
+    return "MEPAR Proxy aktív. Használd a Locus-ban a megadott URL mintát!"
 
 if __name__ == '__main__':
     app.run(debug=True)

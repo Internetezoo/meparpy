@@ -4,6 +4,7 @@ import urllib.parse
 
 app = Flask(__name__)
 
+# A példád alapú cél URL
 TARGET_URL = "https://mepar.mvh.allamkincstar.gov.hu/api/proxy/iier-gs/gwc/service/wmts"
 
 HEADERS = {
@@ -15,40 +16,41 @@ HEADERS = {
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def proxy(path):
-    # Bejövő paraméterek
-    args = dict(request.args)
+    # Locusból jövő nyers adatok
+    incoming_args = dict(request.args)
     
-    if not args:
-        return "Proxy OK, várjuk a Locus kérését!", 200
+    if not incoming_args:
+        return "Proxy fut! A Locus-ban az URL végén legyenek ott a paraméterek.", 200
 
-    # --- KRITIKUS MEPAR JAVÍTÁSOK ---
-    
-    # 1. Viewparams kényszerítése (E nélkül 400-at dob)
-    args['viewparams'] = 'VONEV:null;IGDAT:null'
-    
-    # 2. PNG8 javítása (A MEPAR csak image/png-t fogad)
-    if args.get('FORMAT') == 'image/png8' or args.get('format') == 'image/png8':
-        args['FORMAT'] = 'image/png'
+    # PONTOSAN A PÉLDÁD SZERINTI SORREND ÉS TARTALOM ÖSSZEÁLLÍTÁSA
+    # A sorrend a MEPAR-nál néha számít a cache miatt
+    ordered_params = {
+        "viewparams": "VONEV:null;IGDAT:null",
+        "SRS": "EPSG:23700",
+        "layer": incoming_args.get("LAYER", incoming_args.get("layer", "iier:topo10")),
+        "style": "raster",
+        "tilematrixset": "EOV_teszt",
+        "Service": "WMTS",
+        "Request": "GetTile",
+        "Version": "1.0.0",
+        "Format": "image/png",
+        "TileMatrix": f"EOV_teszt:{incoming_args.get('TILEMATRIX', incoming_args.get('tilematrix', '5')).split(':')[-1]}",
+        "TileCol": incoming_args.get("TILECOL", incoming_args.get("tilecol", "0")),
+        "TileRow": incoming_args.get("TILEROW", incoming_args.get("tilerow", "0"))
+    }
 
-    # 3. Kisbetű/Nagybetű egységesítése (Néha ezen is elúszik)
-    # A MEPAR a nagybetűs SERVICE, REQUEST, LAYER paramétereket szereti
-    final_args = {}
-    for k, v in args.items():
-        final_args[k.upper()] = v
-
-    # Új URL összeállítása
-    encoded_args = urllib.parse.urlencode(final_args)
-    final_url = f"{TARGET_URL}?{encoded_args}"
+    # URL kódolás (az & és = jelek megtartásával)
+    final_url = f"{TARGET_URL}?{urllib.parse.urlencode(ordered_params)}"
 
     try:
-        # curl_cffi használata a Chrome ujjlenyomat miatt
+        # Chrome emuláció a curl_cffi-vel
         resp = requests.get(final_url, headers=HEADERS, impersonate="chrome124", timeout=15)
         
-        # Ha a MEPAR még mindig 400-at dob, küldjük vissza a hibaüzenetét
+        # Ha 400-as hiba van, írjuk ki a MEPAR válaszát, hogy lássuk mi a baj
         if resp.status_code != 200:
-            return Response(f"MEPAR hiba: {resp.text}", status=resp.status_code)
+            return Response(f"MEPAR hiba: {resp.text}", status=resp.status_code, content_type="text/plain")
 
-        return Response(resp.content, status=resp.status_code, content_type=resp.headers.get("Content-Type"))
-    
+        return Response(resp.content, status=resp.status_code, content_type=resp.headers.get("Content-Type", "image/png"))
+
     except Exception as e:
-        return f"Proxy belső hiba: {str(e)}", 500
+        return f"Proxy hiba: {str(e)}", 500

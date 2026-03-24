@@ -5,55 +5,70 @@ import math
 
 app = Flask(__name__)
 
-# WGS84 (Locus/GPS) -> EOV (MEPAR) átváltó
-to_eov = Transformer.from_crs("EPSG:3857", "EPSG:23700", always_xy=True)
+# 1. Átváltó definiálása: Web Mercator (Locus) -> EOV (MEPAR)
+# Mindig XY sorrendben (Lon, Lat / Kelet, Észak)
+transformer = Transformer.from_crs("EPSG:3857", "EPSG:23700", always_xy=True)
 
-# MEPAR EOV Mátrix alapadatai (EOV kezdőpont és felbontások)
-# Ezek nélkülözhetetlenek a pontos átszámításhoz
-ORIGIN_X = 422114.56   # EOV Nyugati szél
-ORIGIN_Y = 362483.52   # EOV Északi szél
-TILE_SIZE = 256        # Pixel méret
+TARGET_URL = "https://mepar.mvh.allamkincstar.gov.hu/api/proxy/iier-gs/gwc/service/wmts"
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def proxy(path):
     args = dict(request.args)
-    if not args: return "Proxy aktív, matek üzemmód bekapcsolva.", 200
+    if not args:
+        return "MEPAR EOV-WGS84 Átváltó Proxy Aktív", 200
 
-    # 1. Locus Mercator adatainak fogadása
+    # Locus paraméterek (x, y, z)
     try:
-        z = int(args.get('z', 5))
-        x = int(args.get('x', 0))
-        y = int(args.get('y', 0))
-    except: return "Hibás paraméterek", 400
+        z = int(args.get('tilematrix', args.get('z', 0)))
+        x = int(args.get('tilecol', args.get('x', 0)))
+        y = int(args.get('tilerow', args.get('y', 0)))
+    except:
+        return "Hibás x,y,z paraméterek", 400
 
-    # 2. MATEK: Mercator X,Y -> EOV X,Y konverzió (leegyszerűsítve)
-    # A Locus csempe közepének kiszámítása
-    world_size = 20037508.34 * 2
-    res = world_size / (2**z * TILE_SIZE)
-    merc_x = (x * TILE_SIZE * res) - 20037508.34
-    merc_y = 20037508.34 - (y * TILE_SIZE * res)
-
-    # Átváltás EOV-ba
-    eov_x, eov_y = to_eov.transform(merc_x, merc_y)
-
-    # 3. MATEK: EOV koordináta -> MEPAR TileCol/TileRow
-    # Itt a MEPAR konkrét TileMatrixSet felbontásait kell használni (EOV_teszt)
-    # Ez a rész kritikus, mert a zoom szintek nem egyeznek pontosan!
-    mepar_z = z # Ez csak közelítés, a valóságban eltolás kellhet
+    # 2. MATEK: Mercator csempe -> EOV koordináta
+    # Kiszámoljuk a csempe közepét méterben (Mercator EPSG:3857)
+    n = 2.0 ** z
+    lon_deg = x / n * 360.0 - 180.0
+    lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
+    lat_deg = math.degrees(lat_rad)
     
-    # MEPAR URL összeállítása
-    target_url = f"https://mepar.mvh.allamkincstar.gov.hu/api/proxy/iier-gs/gwc/service/wmts"
-    params = (
+    # Átváltás: GPS -> Mercator Méter -> EOV Méter
+    # (A pyproj-nak közvetlenül is megadhatjuk a Mercatort)
+    world_merc_x = (x / n * 40075016.68) - 20037508.34
+    world_merc_y = 20037508.34 - (y / n * 40075016.68)
+    
+    eov_x, eov_y = transformer.transform(world_merc_x, world_merc_y)
+
+    # 3. MEPAR EOV Mátrix illesztés
+    # Ez a rész a legnehezebb: a Locus 'z' szintje nem ugyanaz, mint a MEPAR 'z' szintje.
+    # Teszteléshez most fixen a te 5-ös szintedet használjuk a kért koordináta közelében.
+    mepar_z = z 
+    mepar_col = int(x) # Itt még finomítani kell a mátrixot!
+    mepar_row = int(y)
+
+    # 4. Kérés összeállítása a te korábbi jól működő fejléceiddel
+    final_params = (
         f"viewparams=VONEV:null;IGDAT:null"
-        f"&Service=WMTS&Request=GetTile&Version=1.0.0"
-        f"&Layer=iier:topo10&Style=raster&Format=image/png"
-        f"&TileMatrixSet=EOV_teszt&TileMatrix=EOV_teszt:{mepar_z}"
-        f"&TileCol={int(eov_x/1000)}&TileRow={int(eov_y/1000)}" # Csak példa számítás!
+        f"&SRS=EPSG:23700"
+        f"&layer=iier:topo10&style=raster&tilematrixset=EOV_teszt"
+        f"&Service=WMTS&Request=GetTile&Version=1.0.0&Format=image/png"
+        f"&TileMatrix=EOV_teszt:{mepar_z}&TileCol={mepar_col}&TileRow={mepar_row}"
     )
 
-    # 4. Lekérés a MEPAR-tól
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://mepar.mvh.allamkincstar.gov.hu/"}
-    resp = requests.get(f"{target_url}?{params}", headers=headers, impersonate="chrome124")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://mepar.mvh.allamkincstar.gov.hu/",
+        "Origin": "https://mepar.mvh.allamkincstar.gov.hu",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Sec-Fetch-Site": "same-origin", # Visszaállítva a te példádra
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "image"
+    }
 
-    return Response(resp.content, content_type="image/png")
+    try:
+        # TLS Impersonate használata a 400-as hiba ellen
+        resp = requests.get(f"{TARGET_URL}?{final_params}", headers=headers, impersonate="chrome124", timeout=15)
+        return Response(resp.content, status=resp.status_code, content_type="image/png")
+    except Exception as e:
+        return str(e), 500

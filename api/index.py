@@ -1,7 +1,13 @@
 from flask import Flask, request, Response
 from curl_cffi import requests
+from pyproj import Transformer
+import math
 
 app = Flask(__name__)
+
+# WGS84 Mercator (Locus: EPSG:3857) -> EOV (MEPAR: EPSG:23700)
+# A 'always_xy=True' biztosítja, hogy Keleti, Északi (X, Y) sorrendet kapjunk
+transformer = Transformer.from_crs("EPSG:3857", "EPSG:23700", always_xy=True)
 
 TARGET_URL = "https://mepar.mvh.allamkincstar.gov.hu/api/proxy/iier-gs/gwc/service/wmts"
 
@@ -10,49 +16,62 @@ TARGET_URL = "https://mepar.mvh.allamkincstar.gov.hu/api/proxy/iier-gs/gwc/servi
 def proxy(path):
     args = dict(request.args)
     if not args:
-        return "Proxy OK - Várjuk a paramétereket", 200
+        return "MEPAR Proxy OK - Matek mód aktív", 200
 
-    # Adatok kinyerése (Locusból vagy böngészőből)
-    z = str(args.get('tilematrix', args.get('z', '5'))).split(':')[-1]
-    x = str(args.get('tilecol', args.get('x', '0')))
-    y = str(args.get('tilerow', args.get('y', '0')))
+    # 1. Locus Mercator adatainak fogadása
+    try:
+        z = int(args.get('z', args.get('tilematrix', 5)))
+        x = int(args.get('x', args.get('tilecol', 0)))
+        y = int(args.get('y', args.get('tilerow', 0)))
+    except:
+        return "Hibás paraméterek", 400
 
-    # PONTOSAN a működő példa szerinti URL felépítése
+    # 2. MATEK: Mercator csempe -> EOV koordináta
+    # Kiszámoljuk a csempe közepét méterben (Web Mercator)
+    n = 2.0 ** z
+    merc_x = (x + 0.5) / n * 40075016.68557849 - 20037508.342789244
+    merc_y = 20037508.342789244 - (y + 0.5) / n * 40075016.68557849
+
+    # Átváltás EOV-ba
+    eov_x, eov_y = transformer.transform(merc_x, merc_y)
+
+    # 3. EOV koordináta -> MEPAR TileCol/TileRow számítása
+    # A MEPAR fix felbontásai (Resolution) EOV egységben (m/pixel)
+    # Ezek a WMTS GetCapabilities-ből jönnek
+    resolutions = [
+        1568.0, 784.0, 392.0, 196.0, 98.0, 49.0, 24.5, 12.25, 
+        6.125, 3.0625, 1.53125, 0.765625, 0.3828125, 0.19140625, 0.095703125
+    ]
+    
+    # MEPAR kezdőpont (bal felső sarok) EOV-ban
+    origin_x = 422114.56
+    origin_y = 362483.52
+    
+    # Megkeressük a megfelelő felbontást a zoom szinthez (Locus Z -> MEPAR Z eltolás lehetséges)
+    # Általában Z_mepar = Z_locus - 2 vagy hasonló az EOV miatt
+    mepar_z = z 
+    res = resolutions[mepar_z] if mepar_z < len(resolutions) else resolutions[-1]
+
+    # Kiszámoljuk, melyik MEPAR csempe esik ide
+    m_col = int((eov_x - origin_x) / (res * 256))
+    m_row = int((origin_y - eov_y) / (res * 256))
+
+    # 4. Kérés összeállítása a MEPAR-nak (A te jól működő fejléceiddel)
     query = (
-        f"viewparams=VONEV:null;IGDAT:null"
-        f"&SRS=EPSG:23700"
-        f"&layer=iier%3Atopo10"
-        f"&style=raster"
-        f"&tilematrixset=EOV_teszt"
-        f"&Service=WMTS"
-        f"&Request=GetTile"
-        f"&Version=1.0.0"
-        f"&Format=image%2Fpng"
-        f"&TileMatrix=EOV_teszt%3A{z}"
-        f"&TileCol={x}"
-        f"&TileRow={y}"
+        f"viewparams=VONEV:null;IGDAT:null&SRS=EPSG:23700"
+        f"&layer=iier%3Atopo10&style=raster&tilematrixset=EOV_teszt"
+        f"&Service=WMTS&Request=GetTile&Version=1.0.0&Format=image%2Fpng"
+        f"&TileMatrix=EOV_teszt%3A{mepar_z}&TileCol={m_col}&TileRow={m_row}"
     )
-
-    final_url = f"{TARGET_URL}?{query}"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
         "Referer": "https://mepar.mvh.allamkincstar.gov.hu/",
-        "Origin": "https://mepar.mvh.allamkincstar.gov.hu",
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "image"
+        "Sec-Fetch-Site": "same-origin"
     }
 
     try:
-        # TLS ujjlenyomat emuláció
-        resp = requests.get(final_url, headers=headers, impersonate="chrome124", timeout=15)
-        
-        if resp.status_code != 200:
-            return Response(f"MEPAR hiba: {resp.status_code}", status=resp.status_code)
-
-        return Response(resp.content, status=200, content_type="image/png")
-    
+        resp = requests.get(f"{TARGET_URL}?{query}", headers=headers, impersonate="chrome124", timeout=15)
+        return Response(resp.content, status=resp.status_code, content_type="image/png")
     except Exception as e:
-        return f"Proxy hiba: {str(e)}", 500
+        return f"Hiba: {str(e)}", 500

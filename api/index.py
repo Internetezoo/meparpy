@@ -1,6 +1,5 @@
 from flask import Flask, request, Response
 from curl_cffi import requests
-import urllib.parse
 
 app = Flask(__name__)
 
@@ -11,44 +10,45 @@ TARGET_URL = "https://mepar.mvh.allamkincstar.gov.hu/api/proxy/iier-gs/gwc/servi
 def proxy(path):
     args = dict(request.args)
     if not args:
-        return "Proxy OK - Várakozás paraméterekre", 200
+        return "Proxy OK - Várakozás a Locus-ra", 200
 
-    # Kinyerjük a számot a tilematrixból (Locusnál ez csak egy szám, pl '5')
-    raw_z = str(args.get('tilematrix', args.get('TILEMATRIX', '5')))
-    z_num = raw_z.split(':')[-1] # Ha 'EOV_teszt:5', akkor '5' lesz
+    # Adatok kinyerése
+    # Locus-ból jöhet kis- és nagybetűvel is, lekezeljük:
+    z = str(args.get('tilematrix', args.get('TILEMATRIX', '5'))).split(':')[-1]
+    x = str(args.get('tilecol', args.get('TILECOL', '0')))
+    y = str(args.get('tilerow', args.get('TILEROW', '0')))
 
-    # PONTOSAN a te példád szerinti paraméterek és sorrend
-    params = [
-        ('viewparams', 'VONEV:null;IGDAT:null'),
-        ('SRS', 'EPSG:23700'),
-        ('layer', 'iier:topo10'),
-        ('style', 'raster'),
-        ('tilematrixset', 'EOV_teszt'),
-        ('Service', 'WMTS'),
-        ('Request', 'GetTile'),
-        ('Version', '1.0.0'),
-        ('Format', 'image/png'),
-        ('TileMatrix', f'EOV_teszt:{z_num}'),
-        ('TileCol', args.get('tilecol', args.get('TILECOL', '0'))),
-        ('TileRow', args.get('tilerow', args.get('TILEROW', '0')))
-    ]
+    # PONTOSAN a te példád szerinti URL felépítése kézzel
+    # Megjegyzés: a %3A a kettőspont (:), a %2F a per jel (/)
+    query = (
+        f"viewparams=VONEV:null;IGDAT:null"
+        f"&SRS=EPSG:23700"
+        f"&layer=iier%3Atopo10"
+        f"&style=raster"
+        f"&tilematrixset=EOV_teszt"
+        f"&Service=WMTS"
+        f"&Request=GetTile"
+        f"&Version=1.0.0"
+        f"&Format=image%2Fpng"
+        f"&TileMatrix=EOV_teszt%3A{z}"
+        f"&TileCol={x}"
+        f"&TileRow={y}"
+    )
 
-    # Kézzel rakjuk össze az URL-t, hogy a sorrend FIX legyen
-    query_string = "&".join([f"{k}={v}" for k, v in params])
-    final_url = f"{TARGET_URL}?{query_string}"
+    final_url = f"{TARGET_URL}?{query}"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
         "Referer": "https://mepar.mvh.allamkincstar.gov.hu/",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
     }
 
     try:
-        # Chrome emuláció kötelező!
+        # Az impersonate="chrome124" kulcsfontosságú a TLS ujjlenyomat miatt!
         resp = requests.get(final_url, headers=headers, impersonate="chrome124", timeout=15)
         
-        # Ha nem 200 OK, akkor baj van
         if resp.status_code != 200:
-            return Response(f"MEPAR hiba kód: {resp.status_code}\nVálasz: {resp.text}", status=resp.status_code)
+            return Response(f"MEPAR hiba kód: {resp.status_code}\nURL: {final_url}\nValasz: {resp.text}", status=resp.status_code)
 
         return Response(resp.content, status=200, content_type="image/png")
     

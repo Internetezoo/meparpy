@@ -1,0 +1,28 @@
+﻿<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <title>MEPAR Proxy Állapot</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
+        .status { padding: 10px; border-radius: 5px; background: #e0f0e0; color: #006000; }
+        code { background: #eee; padding: 2px 5px; }
+        pre { background: #f4f4f4; padding: 10px; overflow-x: auto; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+    <h1>MEPAR Proxy Állapot: <span class="status">FUT</span></h1>
+    <p>A Vercel proxy sikeresen elindult.</p>
+    
+    <h3>Tesztelés</h3>
+    <ul>
+        <li><a href="/?service=WMTS&request=GetCapabilities" target="_blank">GetCapabilities lekérése (XML)</a></li>
+    </ul>
+
+    <h3>Locus Map Beállítás</h3>
+    <p>Másold ezt az URL-t a Locus egyedi térkép (custom map) konfigurációjába:</p>
+    <pre>https://meparpy.vercel.app/?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=iier:topo10&STYLE=raster&FORMAT=image/png&TILEMATRIXSET=EOV_teszt&TILEMATRIX=EOV_teszt:{z}&TILEROW={y}&TILECOL={x}</pre>
+
+    <p><i>Megjegyzés: A <code>viewparams</code>-ot a proxy automatikusan hozzáadja a háttérben.</i></p>
+</body>
+</html>

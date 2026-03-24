@@ -1,11 +1,11 @@
-from flask import Flask, Response, request
+from flask import Flask, Response
 from curl_cffi import requests
 import math
 from pyproj import Transformer
 
 app = Flask(__name__)
 
-# GPS -> EOV váltó
+# GPS -> EOV transzformátor
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:23700", always_xy=True)
 
 def get_tile_bounds(z, x, y):
@@ -15,15 +15,15 @@ def get_tile_bounds(z, x, y):
     lat_deg = math.degrees(lat_rad)
     return lat_deg, lon_deg
 
-# EZ A RÉSZ A FONTOS: Kezelje az /api/ előtagot és az anélküli hívást is!
+# Ez a sor figyeli az /api/z/x/y.png formátumot
 @app.route('/api/<int:z>/<int:x>/<int:y>.png')
-@app.route('/<int:z>/<int:x>/<int:y>.png')
 def mepar_proxy(z, x, y):
     try:
         lat, lon = get_tile_bounds(z, x, y)
         eov_x, eov_y = transformer.transform(lon, lat)
         
-        res = 156543.03 / (2**z) 
+        # Felbontás számítás (EOV méterben)
+        res = 156543.03 / (2**z)
         size = res * 256
         bbox = f"{eov_x},{eov_y-size},{eov_x+size},{eov_y}"
 
@@ -36,18 +36,19 @@ def mepar_proxy(z, x, y):
 
         headers = {
             "Referer": "https://mepar.mvh.allamkincstar.gov.hu/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
 
+        # Lekérés curl_cffi-vel
         r = requests.get(mepar_url, headers=headers, impersonate="chrome110", timeout=15)
         
         if r.status_code == 200:
             return Response(r.content, mimetype='image/png')
-        return f"MEPAR hiba: {r.status_code}", 502
-
+        return f"MEPAR Error: {r.status_code}", 502
     except Exception as e:
-        return f"Hiba: {str(e)}", 500
+        return str(e), 500
 
+# Alapértelmezett útvonal teszteléshez
 @app.route('/')
 def home():
-    return "Szerver elerheto!"
+    return "Proxy fut. Probald ezt: /api/14/8950/5670.png"
